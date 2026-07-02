@@ -1,0 +1,12 @@
+{
+  "name": "privacyshield-proxy",
+  "version": "1.0.0",
+  "description": "Proxy server voor PrivacyShield — stuurt verzoeken door naar Anthropic API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
