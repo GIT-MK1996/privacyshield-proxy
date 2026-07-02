@@ -35,29 +35,40 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      const prompt = `Je bent een AVG-privacytool. Anonimiseer ALLE persoonsgegevens in de tekst hieronder.
+      const prompt = `Je bent een AVG-privacytool. Vervang ALLE persoonsgegevens in de tekst door labels.
 
-Vervang de volgende categorieën door het bijbehorende label:
-- Volledige namen, voornamen, achternamen, roepnamen, initialen (T. Jansen, W.J.G. Riel) → <PERSOON>
-- Bedrijfsnamen (ook bv, B.V., nv, VOF, Ltd etc.) → <BEDRIJF>
-- Woonplaats, geboorteplaats → <PLAATS>
-- Personeelsnummer, klantnummer, lidnummer, studentnummer, dossiernummer → <ID-NUMMER>
-- Leeftijd als herleidbaar naar persoon → <LEEFTIJD>
-- Kenteken → <KENTEKEN>
-- Gebruikers-ID, pasnummer, werkstation → <ID-NUMMER>
-- Bestandsnamen met persoonsgegevens erin → <BESTANDSNAAM>
+STAP 1 - Vervang alle persoonsnamen door <PERSOON>:
+- Volledige namen: Jan de Vries, Sophie Jansen, Sanne de Bruin
+- Namen met tussenvoegsel: Jeroen Michiel van Ommen, Fatima El Amrani
+- Initialen + achternaam: W.J.G. Riel, T. Hellfayer
+- Elk voorkomen, ook als de naam al eerder is vervangen
+- Ook namen in zinnen zoals "opgesteld door Pieter Lammers" of "verstuurd door Fatima El Amrani"
 
-Deze labels zijn al vervangen en moet je laten staan:
-<IBAN>, <BSN>, <E-MAIL>, <TELEFOON>, <ADRES>, <POSTCODE>, <BEDRAG>, <DATUM>, <TIJD>, <IP-ADRES>
+STAP 2 - Vervang bedrijfsnamen door <BEDRIJF>:
+- Alles met bv, B.V., nv, VOF, Ltd, GmbH, Inc achteraan
 
-Regels:
-- Vervang ELKE voorkomen, ook als een naam 10x voorkomt
-- Wees consistent: dezelfde naam altijd hetzelfde label
-- Houd de rest van de tekst EXACT hetzelfde
-- Geef ALLEEN de geanonimiseerde tekst terug, geen uitleg of extra tekst
+STAP 3 - Vervang woon- en geboorteplaatsen door <PLAATS>:
+- Alleen als het gaat om waar iemand woont of geboren is
 
-Tekst:
-${tekst}`;
+STAP 4 - Vervang nog niet vervangen ID-nummers door <ID-NUMMER>:
+- Personeelsnummers zoals P-2024-0671 of EMP-123
+- Klantnummers, lidnummers, studentnummers
+- Dossiernummers die nog niet zijn vervangen
+
+STAP 5 - Vervang leeftijden die herleidbaar zijn door <LEEFTIJD>:
+- "de 34-jarige medewerker"
+
+Laat deze labels precies zoals ze zijn (al eerder vervangen):
+<IBAN>, <BSN>, <E-MAIL>, <TELEFOON>, <ADRES>, <POSTCODE>, <BEDRAG>, <DATUM>, <TIJD>, <IP-ADRES>, <KENTEKEN>, <ID-NUMMER>, <GEBRUIKERS-ID>, <WERKSTATION>, <BESTANDSNAAM>
+
+KRITIEKE REGELS:
+- Vervang ELKE naam, ook als die 5x of 10x voorkomt in de tekst
+- Geef UITSLUITEND de geanonimiseerde tekst terug
+- Geen uitleg, geen samenvatting, geen extra tekst eromheen
+- Verander niks aan de rest van de tekst
+
+Tekst om te anonimiseren:
+\${tekst}\``;
 
       const payload = JSON.stringify({
         model: 'claude-sonnet-4-6',
