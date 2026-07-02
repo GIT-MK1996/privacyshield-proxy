@@ -1,29 +1,44 @@
 const http = require('http');
 const https = require('https');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 
 const server = http.createServer((req, res) => {
-  // CORS headers — sta verzoeken toe van elke origin
+  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(200);
+    res.writeHead(204);
     res.end();
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/anonimiseer') {
+    if (!API_KEY) {
+      console.error('ANTHROPIC_API_KEY niet ingesteld!');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'API key niet geconfigureerd' }));
+      return;
+    }
+
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       let tekst;
       try {
         tekst = JSON.parse(body).tekst;
-      } catch {
+      } catch (e) {
+        console.error('JSON parse fout:', e.message);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Ongeldige JSON' }));
         return;
@@ -35,13 +50,15 @@ const server = http.createServer((req, res) => {
         return;
       }
 
+      console.log(`Tekst ontvangen: ${tekst.length} tekens`);
+
       const prompt = `Je bent een AVG-privacytool. Vervang ALLE persoonsgegevens in de tekst door labels.
 
 STAP 1 - Vervang alle persoonsnamen door <PERSOON>:
 - Volledige namen: Jan de Vries, Sophie Jansen, Sanne de Bruin
 - Namen met tussenvoegsel: Jeroen Michiel van Ommen, Fatima El Amrani
 - Initialen + achternaam: W.J.G. Riel, T. Hellfayer
-- Elk voorkomen, ook als de naam al eerder is vervangen
+- Elk voorkomen, ook als de naam al eerder vervangen is
 - Ook namen in zinnen zoals "opgesteld door Pieter Lammers" of "verstuurd door Fatima El Amrani"
 
 STAP 2 - Vervang bedrijfsnamen door <BEDRIJF>:
@@ -53,22 +70,19 @@ STAP 3 - Vervang woon- en geboorteplaatsen door <PLAATS>:
 STAP 4 - Vervang nog niet vervangen ID-nummers door <ID-NUMMER>:
 - Personeelsnummers zoals P-2024-0671 of EMP-123
 - Klantnummers, lidnummers, studentnummers
-- Dossiernummers die nog niet zijn vervangen
 
-STAP 5 - Vervang leeftijden die herleidbaar zijn door <LEEFTIJD>:
-- "de 34-jarige medewerker"
+STAP 5 - Vervang leeftijden die herleidbaar zijn door <LEEFTIJD>
 
-Laat deze labels precies zoals ze zijn (al eerder vervangen):
+Laat deze labels precies zoals ze zijn:
 <IBAN>, <BSN>, <E-MAIL>, <TELEFOON>, <ADRES>, <POSTCODE>, <BEDRAG>, <DATUM>, <TIJD>, <IP-ADRES>, <KENTEKEN>, <ID-NUMMER>, <GEBRUIKERS-ID>, <WERKSTATION>, <BESTANDSNAAM>
 
 KRITIEKE REGELS:
-- Vervang ELKE naam, ook als die 5x of 10x voorkomt in de tekst
-- Geef UITSLUITEND de geanonimiseerde tekst terug
-- Geen uitleg, geen samenvatting, geen extra tekst eromheen
+- Vervang ELKE naam, ook als die 10x voorkomt
+- Geef UITSLUITEND de geanonimiseerde tekst terug, geen uitleg
 - Verander niks aan de rest van de tekst
 
-Tekst om te anonimiseren:
-\${tekst}\``;
+Tekst:
+${tekst}`;
 
       const payload = JSON.stringify({
         model: 'claude-sonnet-4-6',
@@ -94,17 +108,26 @@ Tekst om te anonimiseren:
         apiRes.on('end', () => {
           try {
             const parsed = JSON.parse(data);
+            if (parsed.error) {
+              console.error('Anthropic API fout:', parsed.error);
+              res.writeHead(502, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: parsed.error.message }));
+              return;
+            }
             const result = parsed.content?.[0]?.text || tekst;
+            console.log(`Resultaat: ${result.length} tekens`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ result }));
-          } catch {
+          } catch (e) {
+            console.error('Parse fout:', e.message);
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Fout bij verwerking API-antwoord' }));
+            res.end(JSON.stringify({ error: 'Fout bij verwerking' }));
           }
         });
       });
 
       apiReq.on('error', err => {
+        console.error('API verbindingsfout:', err.message);
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Kan Anthropic API niet bereiken' }));
       });
@@ -115,17 +138,11 @@ Tekst om te anonimiseren:
     return;
   }
 
-  // Health check
-  if (req.method === 'GET' && req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Niet gevonden' }));
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`PrivacyShield proxy draait op poort ${PORT}`);
+  console.log(`API key aanwezig: ${!!API_KEY}`);
 });
