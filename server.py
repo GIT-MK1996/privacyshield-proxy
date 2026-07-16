@@ -68,43 +68,68 @@ def anonymize_with_claude(tekst):
     )
     return message.content[0].text
 
+def process_run_text(para, anon_text):
+    """Vervang tekst in runs terwijl opmaak per run bewaard blijft."""
+    if not para.runs:
+        return
+    original = para.text
+    if original == anon_text:
+        return
+    if len(para.runs) == 1:
+        para.runs[0].text = anon_text
+    else:
+        total_orig = len(original)
+        remaining = anon_text
+        for i, run in enumerate(para.runs):
+            if i == len(para.runs) - 1:
+                run.text = remaining
+            elif total_orig > 0 and run.text:
+                ratio = len(run.text) / total_orig
+                chars = max(1, int(len(anon_text) * ratio))
+                run.text = remaining[:chars]
+                remaining = remaining[chars:]
+            else:
+                run.text = ""
+
 def anonymize_docx(file_bytes):
-    """Verwerk DOCX: bewaar opmaak, vervang alleen tekst."""
+    """Verwerk DOCX: bewaar opmaak incl. afbeeldingen, vervang alleen tekst."""
     doc = Document(BytesIO(file_bytes))
 
     def process_paragraph(para):
-        # Verzamel volledige tekst van de paragraaf
         full_text = para.text
         if not full_text.strip():
             return
-
-        # Anonimiseer de volledige tekst
         anon_text = anonymize_with_claude(full_text)
+        if anon_text != full_text:
+            process_run_text(para, anon_text)
 
-        if anon_text == full_text:
-            return  # Niets veranderd
-
-        # Bewaar opmaak van eerste run, vervang tekst
-        if para.runs:
-            # Zet de geanonimiseerde tekst in de eerste run
-            first_run = para.runs[0]
-            first_run.text = anon_text
-            # Verwijder overige runs (tekst is nu in eerste run)
-            for run in para.runs[1:]:
-                run.text = ""
-
-    # Verwerk alle paragrafen in het document
+    # Verwerk hoofdtekst
     for para in doc.paragraphs:
         process_paragraph(para)
 
-    # Verwerk tekst in tabellen
+    # Verwerk tabellen
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
                     process_paragraph(para)
 
-    # Sla op in geheugen
+    # Verwerk headers en footers — afbeeldingen blijven intact
+    for section in doc.sections:
+        for header in [section.header, section.first_page_header, section.even_page_header]:
+            if header:
+                for para in header.paragraphs:
+                    process_paragraph(para)
+                for table in header.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for para in cell.paragraphs:
+                                process_paragraph(para)
+        for footer in [section.footer, section.first_page_footer, section.even_page_footer]:
+            if footer:
+                for para in footer.paragraphs:
+                    process_paragraph(para)
+
     output = BytesIO()
     doc.save(output)
     output.seek(0)
