@@ -95,7 +95,15 @@ def anonymize_docx(file_bytes):
     """Verwerk DOCX: bewaar opmaak incl. afbeeldingen, vervang alleen tekst."""
     doc = Document(BytesIO(file_bytes))
 
+    def has_drawing(para):
+        """Check of paragraaf een afbeelding bevat."""
+        from docx.oxml.ns import qn as _qn
+        return bool(para._p.findall('.//' + _qn('w:drawing')))
+
     def process_paragraph(para):
+        # Sla paragrafen met afbeeldingen over — die blijven intact
+        if has_drawing(para):
+            return
         full_text = para.text
         if not full_text.strip():
             return
