@@ -1,12 +1,9 @@
 import os
 import json
 import re
-import copy
 import anthropic
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
-
-# python-docx
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -14,7 +11,6 @@ PORT = int(os.environ.get("PORT", 8080))
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 client = anthropic.Anthropic(api_key=API_KEY)
 
-# ── Claude prompt ──
 PROMPT = """Je bent een AVG-privacytool. Vervang ALLE persoonsgegevens in de tekst door labels.
 
 Vervang:
@@ -24,7 +20,7 @@ Vervang:
 - Personeels/klantnummers → <ID-NUMMER>
 - Leeftijd als herleidbaar → <LEEFTIJD>
 
-Laat deze labels zoals ze zijn (al vervangen):
+Laat deze labels zoals ze zijn:
 <IBAN>, <BSN>, <E-MAIL>, <TELEFOON>, <ADRES>, <POSTCODE>, <BEDRAG>, <DATUM>, <TIJD>, <IP-ADRES>, <KENTEKEN>, <ID-NUMMER>, <GEBRUIKERS-ID>, <WERKSTATION>, <BESTANDSNAAM>
 
 REGELS:
@@ -35,7 +31,6 @@ REGELS:
 Tekst:
 """
 
-# ── Vaste regex patronen ──
 PATTERNS = [
     (re.compile(r'\bNL\d{2}[A-Z]{4}\d{10}\b'), '<IBAN>'),
     (re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'), '<E-MAIL>'),
@@ -59,7 +54,6 @@ def vaste_patronen(tekst):
     return tekst
 
 def anonymize_with_claude(tekst):
-    """Stap 1: vaste patronen. Stap 2: Claude voor namen/bedrijven."""
     tussen = vaste_patronen(tekst)
     message = client.messages.create(
         model="claude-sonnet-4-6",
@@ -68,75 +62,90 @@ def anonymize_with_claude(tekst):
     )
     return message.content[0].text
 
-def process_run_text(para, anon_text):
-    """Vervang tekst in runs terwijl opmaak per run bewaard blijft."""
-    if not para.runs:
+def has_drawing(para):
+    return bool(para._p.findall('.//' + qn('w:drawing')))
+
+def process_para(para, vervangingen):
+    """Vervang tekst per run — bewaar opmaak en afbeeldingen."""
+    if has_drawing(para):
         return
-    original = para.text
-    if original == anon_text:
+    if not para.text.strip():
         return
-    if len(para.runs) == 1:
-        para.runs[0].text = anon_text
-    else:
-        total_orig = len(original)
-        remaining = anon_text
-        for i, run in enumerate(para.runs):
-            if i == len(para.runs) - 1:
-                run.text = remaining
-            elif total_orig > 0 and run.text:
-                ratio = len(run.text) / total_orig
-                chars = max(1, int(len(anon_text) * ratio))
-                run.text = remaining[:chars]
-                remaining = remaining[chars:]
-            else:
-                run.text = ""
+    for run in para.runs:
+        if not run.text:
+            continue
+        nieuw = run.text
+        # Vaste patronen
+        for patroon, label in PATTERNS:
+            nieuw = patroon.sub(label, nieuw)
+        # Claude vervangingen
+        for origineel, label in vervangingen.items():
+            nieuw = nieuw.replace(origineel, label)
+        if nieuw != run.text:
+            run.text = nieuw
 
 def anonymize_docx(file_bytes):
-    """Verwerk DOCX: bewaar opmaak incl. afbeeldingen, vervang alleen tekst."""
+    """Verwerk DOCX: vervang tekst per run, bewaar opmaak en afbeeldingen."""
     doc = Document(BytesIO(file_bytes))
 
-    def has_drawing(para):
-        """Check of paragraaf een afbeelding bevat."""
-        from docx.oxml.ns import qn as _qn
-        return bool(para._p.findall('.//' + _qn('w:drawing')))
-
-    def process_paragraph(para):
-        # Sla paragrafen met afbeeldingen over — die blijven intact
-        if has_drawing(para):
-            return
-        full_text = para.text
-        if not full_text.strip():
-            return
-        anon_text = anonymize_with_claude(full_text)
-        if anon_text != full_text:
-            process_run_text(para, anon_text)
-
-    # Verwerk hoofdtekst
+    # Verzamel alle tekst voor Claude analyse
+    alle_tekst = []
     for para in doc.paragraphs:
-        process_paragraph(para)
-
-    # Verwerk tabellen
+        if not has_drawing(para) and para.text.strip():
+            alle_tekst.append(para.text)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    process_paragraph(para)
+                    if not has_drawing(para) and para.text.strip():
+                        alle_tekst.append(para.text)
 
-    # Verwerk headers en footers — afbeeldingen blijven intact
+    # Stuur alles in één keer naar Claude
+    gecombineerd = '\n'.join(alle_tekst)
+    geanonimiseerd = anonymize_with_claude(gecombineerd)
+
+    # Bouw vervangingen op uit Claude's output
+    origineel_regels = gecombineerd.split('\n')
+    anon_regels = geanonimiseerd.split('\n')
+    vervangingen = {}
+
+    for orig, anon in zip(origineel_regels, anon_regels):
+        if orig != anon:
+            # Vind per woord wat er veranderd is
+            orig_woorden = orig.split()
+            anon_woorden = anon.split()
+            if len(orig_woorden) == len(anon_woorden):
+                for o, a in zip(orig_woorden, anon_woorden):
+                    if o != a and o not in vervangingen:
+                        vervangingen[o] = a
+            # Voeg ook volledige zinsdelen toe
+            import difflib
+            matcher = difflib.SequenceMatcher(None, orig, anon)
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'replace' and i2 - i1 > 2:
+                    vervangingen[orig[i1:i2]] = anon[j1:j2]
+
+    print(f"Vervangingen: {vervangingen}")
+
+    # Pas vervangingen toe op het document
+    for para in doc.paragraphs:
+        process_para(para, vervangingen)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    process_para(para, vervangingen)
+
     for section in doc.sections:
         for header in [section.header, section.first_page_header, section.even_page_header]:
             if header:
                 for para in header.paragraphs:
-                    process_paragraph(para)
-                for table in header.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for para in cell.paragraphs:
-                                process_paragraph(para)
+                    process_para(para, vervangingen)
         for footer in [section.footer, section.first_page_footer, section.even_page_footer]:
             if footer:
                 for para in footer.paragraphs:
-                    process_paragraph(para)
+                    process_para(para, vervangingen)
 
     output = BytesIO()
     doc.save(output)
@@ -173,7 +182,6 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
 
-        # ── Tekst anonimiseren ──
         if self.path == "/anonimiseer":
             try:
                 data = json.loads(body)
@@ -194,7 +202,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
 
-        # ── DOCX anonimiseren ──
         elif self.path == "/anonimiseer-docx":
             try:
                 result_bytes = anonymize_docx(body)
