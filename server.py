@@ -85,10 +85,13 @@ def process_para(para, vervangingen):
             run.text = nieuw
 
 def anonymize_docx(file_bytes):
-    """Verwerk DOCX: vervang tekst per run, bewaar opmaak en afbeeldingen."""
+    """Verwerk DOCX: bewaar opmaak en afbeeldingen, vervang alleen tekst."""
+    import zipfile as zf
+    import difflib
+
     doc = Document(BytesIO(file_bytes))
 
-    # Verzamel alle tekst voor Claude analyse
+    # Verzamel alle tekst voor Claude
     alle_tekst = []
     for para in doc.paragraphs:
         if not has_drawing(para) and para.text.strip():
@@ -100,55 +103,68 @@ def anonymize_docx(file_bytes):
                     if not has_drawing(para) and para.text.strip():
                         alle_tekst.append(para.text)
 
-    # Stuur alles in één keer naar Claude
+    # Claude anonimiseert alles in één keer
     gecombineerd = '\n'.join(alle_tekst)
     geanonimiseerd = anonymize_with_claude(gecombineerd)
 
-    # Bouw vervangingen op uit Claude's output
-    origineel_regels = gecombineerd.split('\n')
-    anon_regels = geanonimiseerd.split('\n')
+    # Bouw vervangingen-woordenboek
     vervangingen = {}
-
-    for orig, anon in zip(origineel_regels, anon_regels):
+    for orig, anon in zip(gecombineerd.split('\n'), geanonimiseerd.split('\n')):
         if orig != anon:
-            # Vind per woord wat er veranderd is
-            orig_woorden = orig.split()
-            anon_woorden = anon.split()
-            if len(orig_woorden) == len(anon_woorden):
-                for o, a in zip(orig_woorden, anon_woorden):
-                    if o != a and o not in vervangingen:
-                        vervangingen[o] = a
-            # Voeg ook volledige zinsdelen toe
-            import difflib
             matcher = difflib.SequenceMatcher(None, orig, anon)
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                if tag == 'replace' and i2 - i1 > 2:
+                if tag == 'replace' and i2 - i1 > 1:
                     vervangingen[orig[i1:i2]] = anon[j1:j2]
 
-    print(f"Vervangingen: {vervangingen}")
+    print(f"Vervangingen: {list(vervangingen.keys())}")
 
-    # Pas vervangingen toe op het document
+    # Pas toe per run
+    def process_all(para):
+        if has_drawing(para):
+            return
+        if not para.text.strip():
+            return
+        for run in para.runs:
+            if not run.text:
+                continue
+            nieuw = run.text
+            for patroon, label in PATTERNS:
+                nieuw = patroon.sub(label, nieuw)
+            for orig, anon in vervangingen.items():
+                nieuw = nieuw.replace(orig, anon)
+            if nieuw != run.text:
+                run.text = nieuw
+
     for para in doc.paragraphs:
-        process_para(para, vervangingen)
-
+        process_all(para)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    process_para(para, vervangingen)
+                    process_all(para)
 
-    for section in doc.sections:
-        for header in [section.header, section.first_page_header, section.even_page_header]:
-            if header:
-                for para in header.paragraphs:
-                    process_para(para, vervangingen)
-        for footer in [section.footer, section.first_page_footer, section.even_page_footer]:
-            if footer:
-                for para in footer.paragraphs:
-                    process_para(para, vervangingen)
+    # Sla op met python-docx
+    docx_output = BytesIO()
+    doc.save(docx_output)
+    docx_output.seek(0)
+    docx_bytes = docx_output.read()
+
+    # Zet originele media bestanden terug (logo, handtekeningen etc.)
+    orig_media = {}
+    with zf.ZipFile(BytesIO(file_bytes), 'r') as zorig:
+        for name in zorig.namelist():
+            if 'media' in name:
+                orig_media[name] = zorig.read(name)
 
     output = BytesIO()
-    doc.save(output)
+    with zf.ZipFile(BytesIO(docx_bytes), 'r') as znew:
+        with zf.ZipFile(output, 'w') as zout:
+            for item in znew.infolist():
+                if item.filename in orig_media:
+                    zout.writestr(item, orig_media[item.filename], compress_type=item.compress_type)
+                else:
+                    zout.writestr(item, znew.read(item.filename), compress_type=item.compress_type)
+
     output.seek(0)
     return output.read()
 
