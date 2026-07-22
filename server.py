@@ -1,6 +1,8 @@
 import os
 import json
 import re
+import zipfile
+import difflib
 import anthropic
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
@@ -65,30 +67,8 @@ def anonymize_with_claude(tekst):
 def has_drawing(para):
     return bool(para._p.findall('.//' + qn('w:drawing')))
 
-def process_para(para, vervangingen):
-    """Vervang tekst per run — bewaar opmaak en afbeeldingen."""
-    if has_drawing(para):
-        return
-    if not para.text.strip():
-        return
-    for run in para.runs:
-        if not run.text:
-            continue
-        nieuw = run.text
-        # Vaste patronen
-        for patroon, label in PATTERNS:
-            nieuw = patroon.sub(label, nieuw)
-        # Claude vervangingen
-        for origineel, label in vervangingen.items():
-            nieuw = nieuw.replace(origineel, label)
-        if nieuw != run.text:
-            run.text = nieuw
-
 def anonymize_docx(file_bytes):
-    """Verwerk DOCX: bewaar opmaak en afbeeldingen, vervang alleen tekst."""
-    import zipfile as zf
-    import difflib
-
+    """Verwerk DOCX: bewaar logo en afbeeldingen, vervang alleen tekst."""
     doc = Document(BytesIO(file_bytes))
 
     # Verzamel alle tekst voor Claude
@@ -107,7 +87,7 @@ def anonymize_docx(file_bytes):
     gecombineerd = '\n'.join(alle_tekst)
     geanonimiseerd = anonymize_with_claude(gecombineerd)
 
-    # Bouw vervangingen-woordenboek
+    # Bouw vervangingen-woordenboek via difflib
     vervangingen = {}
     for orig, anon in zip(gecombineerd.split('\n'), geanonimiseerd.split('\n')):
         if orig != anon:
@@ -116,10 +96,10 @@ def anonymize_docx(file_bytes):
                 if tag == 'replace' and i2 - i1 > 1:
                     vervangingen[orig[i1:i2]] = anon[j1:j2]
 
-    print(f"Vervangingen: {list(vervangingen.keys())}")
+    print(f"Vervangingen gevonden: {len(vervangingen)}")
 
-    # Pas toe per run
-    def process_all(para):
+    # Pas toe per run — runs nooit samenvoegen
+    def process_para(para):
         if has_drawing(para):
             return
         if not para.text.strip():
@@ -136,12 +116,12 @@ def anonymize_docx(file_bytes):
                 run.text = nieuw
 
     for para in doc.paragraphs:
-        process_all(para)
+        process_para(para)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    process_all(para)
+                    process_para(para)
 
     # Sla op met python-docx
     docx_output = BytesIO()
@@ -149,16 +129,17 @@ def anonymize_docx(file_bytes):
     docx_output.seek(0)
     docx_bytes = docx_output.read()
 
-    # Zet originele media bestanden terug (logo, handtekeningen etc.)
+    # Haal originele media op (logo, handtekeningen etc.)
     orig_media = {}
-    with zf.ZipFile(BytesIO(file_bytes), 'r') as zorig:
+    with zipfile.ZipFile(BytesIO(file_bytes), 'r') as zorig:
         for name in zorig.namelist():
             if 'media' in name:
                 orig_media[name] = zorig.read(name)
 
+    # Zet originele media terug in het nieuwe bestand
     output = BytesIO()
-    with zf.ZipFile(BytesIO(docx_bytes), 'r') as znew:
-        with zf.ZipFile(output, 'w') as zout:
+    with zipfile.ZipFile(BytesIO(docx_bytes), 'r') as znew:
+        with zipfile.ZipFile(output, 'w') as zout:
             for item in znew.infolist():
                 if item.filename in orig_media:
                     zout.writestr(item, orig_media[item.filename], compress_type=item.compress_type)
